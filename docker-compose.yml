@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  # Discord bot implementation (runs continuously)
+  tailscale-monitor:
+    build: .
+    container_name: tailscale-monitor
+    restart: unless-stopped
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - TAILSCALE_API_KEY=${TAILSCALE_API_KEY}
+    volumes:
+      - ./last_notifications.json:/app/last_notifications.json

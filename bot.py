@@ -219,6 +219,7 @@ async def fetch_devices(api_key: str, session: aiohttp.ClientSession, max_retrie
             # Cache the DNS for tailscale API before attempting to connect
             if "api.tailscale.com" not in dns_cache.cache:
                 try:
+                    # Resolve important domains at startup
                     ip = socket.gethostbyname("api.tailscale.com")
                     dns_cache.set("api.tailscale.com", ip)
                     logger.info(f"Cached new DNS for api.tailscale.com: {ip}")
@@ -996,13 +997,18 @@ def cleanup_resources():
     asyncio.set_event_loop(loop)
     
     async def close_sessions():
-        for task in asyncio.all_tasks(loop=loop):
-            if not task.done():
-                task.cancel()
+        current = asyncio.current_task(loop=loop)
+        tasks = [t for t in asyncio.all_tasks(loop=loop) if t is not current and not t.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     try:
         # Run the cleanup coroutine
         loop.run_until_complete(close_sessions())
+    except asyncio.CancelledError:
+        # Ignore cancellation errors during cleanup
+        pass
     except Exception as e:
         print(f"Error during session cleanup: {e}")
     finally:

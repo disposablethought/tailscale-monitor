@@ -1,0 +1,30 @@
+# Ignore Python cache and builds
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Virtual environments
+env/
+venv/
+
+# Git
+.git
+.gitignore
+
+# Environment files
+.env
+
+# Docker config
+.dockerignore
+
+# System files
+.DS_Store
+
+# Runtime state
+last_notifications.json
+
+# Service scripts
+install_service.sh
+tailscale-monitor.service
+tailscale_monitor.sh

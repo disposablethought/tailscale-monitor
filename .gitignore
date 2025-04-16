@@ -88,3 +88,5 @@ pyrightconfig.json
 
 # Project state
 last_notifications.json
+install_service.sh
+tailscale_monitor.sh
