@@ -28,7 +28,15 @@ import discord
 from discord.ext import commands, tasks
 
 # Persistent state file for notification statuses
-STATE_FILE = "notification_state.json"
+# Get configuration directory from environment variable, default to current directory
+CONFIG_DIR = os.environ.get("CONFIG_DIR", ".") 
+
+# Ensure the directory exists
+if not os.path.exists(CONFIG_DIR):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+# Path to notification state file
+STATE_FILE = os.path.join(CONFIG_DIR, "notification_state.json")
 
 # Global state tracking per guild.
 notification_state = {}
@@ -108,7 +116,8 @@ if os.path.exists(STATE_FILE):
 server_config = {}
 
 # Configuration file
-CONFIG_FILE = "server_config.json"
+# Path to server configuration file
+CONFIG_FILE = os.path.join(CONFIG_DIR, "server_config.json")
 
 # Load configuration if it exists
 if os.path.exists(CONFIG_FILE):

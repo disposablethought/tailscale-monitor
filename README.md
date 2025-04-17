@@ -28,8 +28,20 @@ The Discord bot (`bot.py`) provides a real-time, interactive way to monitor your
 
 **Docker Setup:**
 ```bash
+# Create a data directory for persistence
+mkdir -p data
+
+# Start the container
 docker-compose up -d
 ```
+
+**Multi-Server Support:**
+
+This bot supports being added to multiple Discord servers while running as a single instance:
+
+- Each Discord server gets its own configuration (API key, monitored devices, notification channel)
+- All settings persist between container restarts in the `./data` directory
+- Server owners use the `!setup` command in their own server to configure their monitoring
 
 ### Option 2: Shell Script with Cron
 
