@@ -952,7 +952,6 @@ async def send_message_with_rate_limit(channel, content=None, embed=None):
 # Monitoring control commands
 @bot.command(name="start")
 async def start_monitoring(ctx):
-{{ ... }}
     """Start the device monitoring loop"""
     if not server_config.get(str(ctx.guild.id)):
         await ctx.send("❌ This server is not set up yet. Use `!setup` first.")
