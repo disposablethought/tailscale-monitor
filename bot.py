@@ -1065,12 +1065,12 @@ async def status(ctx):
         diagnostics_output = []
         
         # Check DNS cache
-        diagnostics_output.append("📋 **DNS Cache Status:**")
+        diagnostics_output.append("DNS Cache Status:")
         for domain, ip in dns_cache.cache.items():
             diagnostics_output.append(f"- {domain}: {ip}")
         
         # Check current connectivity
-        diagnostics_output.append("\n📡 **Current Connectivity:**")
+        diagnostics_output.append("\nCurrent Connectivity:")
         
         # Test Discord connectivity
         try:
@@ -1083,15 +1083,14 @@ async def status(ctx):
         except Exception as e:
             diagnostics_output.append(f"- ❌ Discord API: {str(e)}")
         
-        # Send bot status results
-        output = "\n".join(diagnostics_output)
-        chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
-        for chunk in chunks:
-            await ctx.send(f"```{chunk}```")
-            
         # Part 2: Tailscale device status
         guild_id = str(ctx.guild.id)
         if guild_id not in server_config:
+            # Send bot status results
+            output = "\n".join(diagnostics_output)
+            chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
+            for chunk in chunks:
+                await ctx.send(f"```{chunk}```")
             await ctx.send("❌ This server is not set up for Tailscale monitoring. Use `!setup` first.")
             return
         
@@ -1099,17 +1098,19 @@ async def status(ctx):
         api_key = guild_conf["api_key"]
         monitored_devices = guild_conf.get("devices")
         
-        embed = discord.Embed(
-            title="Tailscale Device Status",
-            description="Current status of monitored Tailscale devices",
-            color=discord.Color.blue()
-        )
+        # Add header for Tailscale devices
+        diagnostics_output.append("\nTailscale Device Status:")
         
         try:
             session = await create_aiohttp_session()
             async with session:
                 data = await fetch_devices(api_key, session)
                 if data is None:
+                    # Send bot status results before error
+                    output = "\n".join(diagnostics_output)
+                    chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
+                    for chunk in chunks:
+                        await ctx.send(f"```{chunk}```")
                     await ctx.send("❌ Error fetching device data. Please check your API key.")
                     return
                 
@@ -1154,40 +1155,49 @@ async def status(ctx):
                         unknown_count += 1
                         unknown_devices.append({"name": name, "error": str(e)})
                 
-                # Add summary field
-                embed.add_field(
-                    name="📊 Summary",
-                    value=f"🔵 Online: {online_count} | 🔴 Offline: {offline_count} | ❓ Unknown: {unknown_count}",
-                    inline=False
-                )
+                # Add summary to diagnostics
+                diagnostics_output.append(f"\n🔵 Online: {online_count} | 🔴 Offline: {offline_count} | ❓ Unknown: {unknown_count}")
                 
                 # Add online devices
                 if online_devices:
-                    online_text = "\n".join([f"**{d['name']}** - {d['minutes_ago']} mins ago" for d in online_devices])
-                    embed.add_field(name="🔵 Online Devices", value=online_text or "None", inline=False)
+                    diagnostics_output.append("\n🔵 Online Devices:")
+                    for device in online_devices:
+                        diagnostics_output.append(f"- {device['name']} - {device['minutes_ago']} mins ago")
                 
                 # Add offline devices
                 if offline_devices:
-                    offline_text = "\n".join([f"**{d['name']}** - Last seen: {d['last_seen']} UTC ({d['minutes_ago']} mins ago)" for d in offline_devices])
-                    embed.add_field(name="🔴 Offline Devices", value=offline_text or "None", inline=False)
+                    diagnostics_output.append("\n🔴 Offline Devices:")
+                    for device in offline_devices:
+                        diagnostics_output.append(f"- {device['name']} - Last seen: {device['last_seen']} UTC ({device['minutes_ago']} mins ago)")
                 
                 # Add unknown devices
                 if unknown_devices:
-                    unknown_text = "\n".join([f"**{d['name']}** - Error: {d['error']}" for d in unknown_devices])
-                    embed.add_field(name="❓ Unknown Status", value=unknown_text or "None", inline=False)
+                    diagnostics_output.append("\n❓ Unknown Status:")
+                    for device in unknown_devices:
+                        diagnostics_output.append(f"- {device['name']} - Error: {device['error']}")
+                
+                # Handle case with no devices
+                if not online_devices and not offline_devices and not unknown_devices:
+                    if monitored_devices:
+                        diagnostics_output.append("\nNo devices found matching your monitoring list.")
+                    else:
+                        diagnostics_output.append("\nNo devices found in your Tailscale account.")
         
         except Exception as e:
             logger.error(f"Error listing devices in status command: {e}", exc_info=True)
+            # Send what we have so far
+            output = "\n".join(diagnostics_output)
+            chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
+            for chunk in chunks:
+                await ctx.send(f"```{chunk}```")
             await ctx.send(f"❌ Error listing devices: {str(e)}")
             return
         
-        if len(embed.fields) == 1:  # Only summary field
-            if monitored_devices:
-                embed.description = "No devices found matching your monitoring list."
-            else:
-                embed.description = "No devices found in your Tailscale account."
-        
-        await ctx.send(embed=embed)
+        # Send the combined status results
+        output = "\n".join(diagnostics_output)
+        chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
+        for chunk in chunks:
+            await ctx.send(f"```{chunk}```")
     except Exception as e:
         logger.error(f"Error in status command: {e}")
         await ctx.send(f"❌ Error checking status: {str(e)}")
