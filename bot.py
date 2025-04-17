@@ -11,6 +11,7 @@ import logging
 import atexit
 import signal
 from datetime import datetime, timezone, timedelta
+from collections import deque
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +32,71 @@ STATE_FILE = "notification_state.json"
 
 # Global state tracking per guild.
 notification_state = {}
+
+# Discord Rate Limit Handler
+class RateLimiter:
+    def __init__(self, rate_limit_per_second=1, burst_limit=5):
+        self.rate_limit_per_second = rate_limit_per_second  # Standard rate
+        self.burst_limit = burst_limit  # Maximum allowed in burst
+        self.message_timestamps = deque(maxlen=100)  # Track recent message times
+        self.retry_after = 0  # Time to wait if we hit a rate limit
+        
+    async def acquire(self):
+        """Acquire permission to send a message, waiting if necessary"""
+        now = time.time()
+        
+        # If we're in a retry-after period, wait it out
+        if self.retry_after > now:
+            wait_time = self.retry_after - now
+            logger.info(f"Rate limited, waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+            return True
+            
+        # Clean up old timestamps
+        while self.message_timestamps and self.message_timestamps[0] < now - 60:
+            self.message_timestamps.popleft()
+            
+        # Check if we've hit the burst limit
+        if len(self.message_timestamps) >= self.burst_limit:
+            # Calculate the time we need to wait based on the oldest message
+            wait_time = max(0, 1.0/self.rate_limit_per_second - (now - self.message_timestamps[-self.burst_limit]))
+            if wait_time > 0:
+                logger.info(f"Approaching rate limit, throttling for {wait_time:.2f} seconds")
+                await asyncio.sleep(wait_time)
+                
+        # Record this message
+        self.message_timestamps.append(time.time())
+        return True
+        
+    def update_from_response(self, response):
+        """Update rate limit info based on Discord API response headers"""
+        # Check for rate limit headers
+        remaining = response.headers.get('X-RateLimit-Remaining')
+        reset_after = response.headers.get('X-RateLimit-Reset-After')
+        retry_after = response.headers.get('Retry-After')
+        
+        if retry_after is not None:
+            # We hit a rate limit
+            retry_seconds = float(retry_after)
+            self.retry_after = time.time() + retry_seconds
+            logger.warning(f"Discord rate limit hit, retry after {retry_seconds} seconds")
+            return True
+            
+        if remaining is not None and reset_after is not None:
+            # Update our understanding of the rate limit
+            remaining = int(remaining)
+            reset_after = float(reset_after)
+            
+            if remaining == 0:
+                # We're about to hit the rate limit
+                self.retry_after = time.time() + reset_after
+                logger.warning(f"Discord rate limit reached, cooling down for {reset_after} seconds")
+                return True
+                
+        return False
+
+# Create global rate limiter for Discord messages
+global_rate_limiter = RateLimiter(rate_limit_per_second=0.5, burst_limit=5)
 if os.path.exists(STATE_FILE):
     try:
         with open(STATE_FILE, "r") as f:
@@ -313,7 +379,12 @@ async def monitor_devices():
                     last_auth_error = guild_state.get("last_auth_error", 0)
                     current_time = int(datetime.now().timestamp())
                     if current_time - last_auth_error > 3600:
-                        await channel.send(f"❌ Authentication error with Tailscale API (HTTP {data['status']}). Please re-run `!setup` to update your API key.")
+                        # Use the rate limited message helper
+                        await send_message_with_rate_limit(
+                            channel,
+                            content=f"❌ Authentication error with Tailscale API (HTTP {data['status']}). Please re-run `!setup` to update your API key."
+                        )
+                        
                         guild_state["last_auth_error"] = current_time
                         try:
                             with open(STATE_FILE, "w") as f:
@@ -328,7 +399,12 @@ async def monitor_devices():
                     current_time = int(datetime.now().timestamp())
                     
                     if current_time - last_api_error > 3600:  # 1 hour
-                        await channel.send("⚠️ Error fetching Tailscale devices data. Will continue monitoring.")
+                        # Use the rate limited message helper
+                        await send_message_with_rate_limit(
+                            channel,
+                            content="⚠️ Error fetching Tailscale devices data. Will continue monitoring."
+                        )
+                        
                         guild_state["last_api_error"] = current_time
                         # Save the updated error state
                         try:
@@ -338,6 +414,11 @@ async def monitor_devices():
                             logger.error(f"Error saving error state: {e}")
                     continue
 
+                # Count of notifications to be sent this cycle
+                notifications_count = 0
+                notifications_to_send = []
+                
+                # First, gather all devices that need notifications
                 for device in data.get("devices", []):
                     name = device.get("name")
                     # If a device list is specified, skip devices not in that list.
@@ -348,7 +429,7 @@ async def monitor_devices():
                     try:
                         last_seen = datetime.strptime(last_seen_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                     except Exception as e:
-                        print(f"Error parsing time for {name}: {e}")
+                        logger.error(f"Error parsing time for {name}: {e}")
                         continue
 
                     # Fixed threshold of 6 minutes (adjust if needed)
@@ -358,24 +439,55 @@ async def monitor_devices():
                     guild_state = notification_state.setdefault(str(guild.id), {})
                     notified = guild_state.get(name, False)
 
-                    if offline and not notified:
+                    # Only queue notifications if status has changed
+                    if (offline and not notified) or (not offline and notified):
                         minutes_offline = int((now - last_seen).total_seconds() // 60)
-                        message = (f"🔴 Device '{name}' has not been seen for {minutes_offline} minute(s). "
-                                   f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S')} UTC.")
-                        await channel.send(message)
-                        guild_state[name] = True
-                    elif not offline and notified:
-                        message = (f"🟢 Device '{name}' is back online! "
-                                   f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S')} UTC.")
-                        await channel.send(message)
-                        guild_state[name] = False
+                        
+                        if offline and not notified:
+                            message = (f"🔴 Device '{name}' has not been seen for {minutes_offline} minute(s). "
+                                       f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S')} UTC.")
+                            notifications_to_send.append((name, message, True))
+                        elif not offline and notified:
+                            message = (f"🟢 Device '{name}' is back online! "
+                                       f"Last seen: {last_seen.strftime('%Y-%m-%d %H:%M:%S')} UTC.")
+                            notifications_to_send.append((name, message, False))
+                
+                # Prioritize notifications if we're over rate limits
+                if len(notifications_to_send) > 10:
+                    # Prioritize offline notifications over online ones
+                    offline_notifications = [n for n in notifications_to_send if n[2]]
+                    online_notifications = [n for n in notifications_to_send if not n[2]]
+                    
+                    # Take all offline notifications and enough online ones to fit within rate limits
+                    notifications_to_send = offline_notifications + online_notifications[:max(0, 10 - len(offline_notifications))]
+                    logger.warning(f"Rate limiting notifications for guild {guild.id}: sending {len(notifications_to_send)} of {len(notifications_to_send)} possible notifications")
+                
+                # Now send the notifications with rate limiting
+                for name, message, is_offline in notifications_to_send:
+                    # Apply rate limiter before sending each message
+                    await global_rate_limiter.acquire()
+                    
+                    try:
+                        # Use the rate limited message helper
+                        await send_message_with_rate_limit(channel, content=message)
+                        
+                        # Update state after successful send
+                        guild_state = notification_state.setdefault(str(guild.id), {})
+                        guild_state[name] = is_offline
+                        
+                        # Add small delay between messages to prevent bursts
+                        if len(notifications_to_send) > 3:
+                            await asyncio.sleep(0.5)
+                            
+                    except Exception as e:
+                        logger.error(f"Error sending notification: {e}")
 
                 # Persist the updated notification state after processing each guild
                 try:
                     with open(STATE_FILE, "w") as f:
                         json.dump(notification_state, f)
                 except Exception as e:
-                    print(f"Error saving state: {e}")
+                    logger.error(f"Error saving state: {e}")
     except Exception as e:
         # Suppress aiohttp bug: 'NoneType' object has no attribute '_abort' on session close
         if isinstance(e, AttributeError) and "_abort" in str(e):
@@ -810,9 +922,37 @@ async def ping_device(ctx, device_name: str):
         logger.error(f"Error pinging device: {e}", exc_info=True)
         await ctx.send(f"❌ Error checking device: {str(e)}")
 
+async def send_message_with_rate_limit(channel, content=None, embed=None):
+    """Send a message to a channel with rate limiting applied"""
+    try:
+        # Apply rate limiting
+        await global_rate_limiter.acquire()
+        
+        try:    
+            response = await channel.send(content=content, embed=embed)
+            # Update rate limiter based on response
+            if hasattr(response, "_http") and hasattr(response._http, "headers"):
+                global_rate_limiter.update_from_response(response._http)
+            return response
+        except discord.errors.HTTPException as e:
+            if e.status == 429:  # Rate limit error
+                retry_after = e.retry_after
+                logger.warning(f"Discord rate limit hit, waiting {retry_after} seconds")
+                # Update our rate limiter
+                global_rate_limiter.retry_after = time.time() + retry_after
+                await asyncio.sleep(retry_after)
+                # Try again after waiting
+                return await channel.send(content=content, embed=embed)
+            else:
+                raise
+    except Exception as e:
+        logger.error(f"Error sending message: {e}", exc_info=True)
+        raise
+
 # Monitoring control commands
 @bot.command(name="start")
 async def start_monitoring(ctx):
+{{ ... }}
     """Start the device monitoring loop"""
     if not server_config.get(str(ctx.guild.id)):
         await ctx.send("❌ This server is not set up yet. Use `!setup` first.")
