@@ -9,6 +9,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./last_notifications.json:/app/last_notifications.json
-      - ./server_config.json:/app/server_config.json
-      - ./notification_state.json:/app/notification_state.json
+      # Create a data directory to store all persistent files
+      - ./data:/app/data
+    environment:
+      # Path to store configuration files (optional, defaults to current directory)
+      - CONFIG_DIR=/app/data
