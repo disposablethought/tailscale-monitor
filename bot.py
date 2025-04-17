@@ -1048,10 +1048,11 @@ async def show_config(ctx):
 # Network status command
 @bot.command(name="status")
 async def status(ctx):
-    """Check the bot's network connectivity status"""
+    """Check the bot's network connectivity and monitored device status"""
     try:
-        await ctx.send("Checking network status... This may take a moment.")
+        await ctx.send("Checking system and device status... This may take a moment.")
         
+        # Part 1: Bot connectivity status
         diagnostics_output = []
         
         # Check DNS cache
@@ -1073,11 +1074,111 @@ async def status(ctx):
         except Exception as e:
             diagnostics_output.append(f"- ❌ Discord API: {str(e)}")
         
-        # Send results in chunks to avoid message size limits
+        # Send bot status results
         output = "\n".join(diagnostics_output)
         chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
         for chunk in chunks:
             await ctx.send(f"```{chunk}```")
+            
+        # Part 2: Tailscale device status
+        guild_id = str(ctx.guild.id)
+        if guild_id not in server_config:
+            await ctx.send("❌ This server is not set up for Tailscale monitoring. Use `!setup` first.")
+            return
+        
+        guild_conf = server_config[guild_id]
+        api_key = guild_conf["api_key"]
+        monitored_devices = guild_conf.get("devices")
+        
+        embed = discord.Embed(
+            title="Tailscale Device Status",
+            description="Current status of monitored Tailscale devices",
+            color=discord.Color.blue()
+        )
+        
+        try:
+            session = await create_aiohttp_session()
+            async with session:
+                data = await fetch_devices(api_key, session)
+                if data is None:
+                    await ctx.send("❌ Error fetching device data. Please check your API key.")
+                    return
+                
+                now = datetime.now(timezone.utc)
+                threshold = timedelta(minutes=6)
+                
+                online_count = 0
+                offline_count = 0
+                unknown_count = 0
+                
+                # Track devices by status for a more organized display
+                online_devices = []
+                offline_devices = []
+                unknown_devices = []
+                
+                for device in data.get("devices", []):
+                    name = device.get("name")
+                    # Skip devices not in monitored list if a list is specified
+                    if monitored_devices and name not in monitored_devices:
+                        continue
+                    
+                    # Get device status
+                    last_seen_str = device.get("lastSeen")
+                    try:
+                        last_seen = datetime.strptime(last_seen_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        minutes_ago = int((now - last_seen).total_seconds() // 60)
+                        offline = (now - last_seen) > threshold
+                        
+                        status_info = {
+                            "name": name,
+                            "last_seen": last_seen.strftime('%Y-%m-%d %H:%M:%S'),
+                            "minutes_ago": minutes_ago
+                        }
+                        
+                        if offline:
+                            offline_count += 1
+                            offline_devices.append(status_info)
+                        else:
+                            online_count += 1
+                            online_devices.append(status_info)
+                    except Exception as e:
+                        unknown_count += 1
+                        unknown_devices.append({"name": name, "error": str(e)})
+                
+                # Add summary field
+                embed.add_field(
+                    name="📊 Summary",
+                    value=f"🔵 Online: {online_count} | 🔴 Offline: {offline_count} | ❓ Unknown: {unknown_count}",
+                    inline=False
+                )
+                
+                # Add online devices
+                if online_devices:
+                    online_text = "\n".join([f"**{d['name']}** - {d['minutes_ago']} mins ago" for d in online_devices])
+                    embed.add_field(name="🔵 Online Devices", value=online_text or "None", inline=False)
+                
+                # Add offline devices
+                if offline_devices:
+                    offline_text = "\n".join([f"**{d['name']}** - Last seen: {d['last_seen']} UTC ({d['minutes_ago']} mins ago)" for d in offline_devices])
+                    embed.add_field(name="🔴 Offline Devices", value=offline_text or "None", inline=False)
+                
+                # Add unknown devices
+                if unknown_devices:
+                    unknown_text = "\n".join([f"**{d['name']}** - Error: {d['error']}" for d in unknown_devices])
+                    embed.add_field(name="❓ Unknown Status", value=unknown_text or "None", inline=False)
+        
+        except Exception as e:
+            logger.error(f"Error listing devices in status command: {e}", exc_info=True)
+            await ctx.send(f"❌ Error listing devices: {str(e)}")
+            return
+        
+        if len(embed.fields) == 1:  # Only summary field
+            if monitored_devices:
+                embed.description = "No devices found matching your monitoring list."
+            else:
+                embed.description = "No devices found in your Tailscale account."
+        
+        await ctx.send(embed=embed)
     except Exception as e:
         logger.error(f"Error in status command: {e}")
         await ctx.send(f"❌ Error checking status: {str(e)}")
